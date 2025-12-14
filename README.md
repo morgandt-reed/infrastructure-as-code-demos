@@ -1,5 +1,10 @@
 # Infrastructure as Code Demos
 
+[![Terraform](https://github.com/morgandt-reed/infrastructure-as-code-demos/actions/workflows/terraform-validate.yml/badge.svg)](https://github.com/morgandt-reed/infrastructure-as-code-demos/actions/workflows/terraform-validate.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Terraform](https://img.shields.io/badge/Terraform-1.6+-purple?logo=terraform)](https://www.terraform.io/)
+[![AWS](https://img.shields.io/badge/AWS-Provider_5.0-orange?logo=amazonaws)](https://aws.amazon.com/)
+
 Production-ready Terraform modules demonstrating multi-cloud infrastructure patterns and best practices.
 
 ## Overview
