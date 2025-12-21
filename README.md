@@ -11,6 +11,88 @@ Production-ready Terraform modules demonstrating multi-cloud infrastructure patt
 
 This repository showcases reusable Terraform modules for common infrastructure patterns across AWS, Azure, and GCP. Each module is self-contained, well-documented, and production-ready.
 
+## Architecture
+
+### AWS VPC Infrastructure
+
+```mermaid
+flowchart TB
+    subgraph AWS Region
+        subgraph VPC[VPC 10.0.0.0/16]
+            subgraph AZ1[Availability Zone A]
+                PubSub1[Public Subnet<br/>10.0.1.0/24]
+                PrivSub1[Private Subnet<br/>10.0.11.0/24]
+            end
+            subgraph AZ2[Availability Zone B]
+                PubSub2[Public Subnet<br/>10.0.2.0/24]
+                PrivSub2[Private Subnet<br/>10.0.12.0/24]
+            end
+
+            IGW[Internet Gateway]
+            NAT[NAT Gateway]
+            ALB[Application<br/>Load Balancer]
+        end
+
+        subgraph Compute
+            EC2[EC2 Docker Host]
+            ASG[Auto Scaling Group]
+        end
+
+        subgraph Data
+            RDS[(RDS PostgreSQL)]
+            S3[(S3 Bucket)]
+        end
+    end
+
+    Internet((Internet)) --> IGW
+    IGW --> PubSub1 & PubSub2
+    PubSub1 --> NAT
+    NAT --> PrivSub1 & PrivSub2
+    ALB --> ASG
+    ASG --> EC2
+    EC2 --> RDS
+    EC2 --> S3
+
+    style VPC fill:#FF9900,color:#000
+    style PubSub1 fill:#7AA116,color:#fff
+    style PubSub2 fill:#7AA116,color:#fff
+    style PrivSub1 fill:#1A73E8,color:#fff
+    style PrivSub2 fill:#1A73E8,color:#fff
+```
+
+### Terraform Module Composition
+
+```mermaid
+flowchart LR
+    subgraph Root Module
+        Main[main.tf]
+        Vars[variables.tf]
+        Out[outputs.tf]
+    end
+
+    subgraph Child Modules
+        VPC[modules/vpc]
+        Docker[modules/docker-host]
+        DB[modules/databricks-workspace]
+    end
+
+    subgraph Providers
+        AWS[AWS Provider]
+        Azure[Azure Provider]
+        GCP[GCP Provider]
+    end
+
+    Main --> VPC & Docker & DB
+    VPC & Docker & DB --> AWS
+    VPC --> Azure
+    VPC --> GCP
+
+    style Main fill:#7B42BC,color:#fff
+    style AWS fill:#FF9900,color:#000
+    style Azure fill:#0089D6,color:#fff
+    style GCP fill:#4285F4,color:#fff
+```
+
 ## Repository Structure
 
 ```
