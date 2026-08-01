@@ -44,10 +44,10 @@ it work that exists because the password exists.
 
 The stance, stated plainly: **eliminating a requirement beats automating it.**
 Automating custody is a good second answer for when the first is unavailable.
-Knowing which situation you are in — and pushing back when a requirement arrives
-as "automate the secrets" rather than "provision applications without manual
-steps" — is the architect's call, and the point at which the design either sheds a
-whole subsystem or acquires one.
+A requirement phrased as "automate secret custody" is worth re-reading as
+"provision applications without manual steps", because the second admits
+solutions the first forecloses — and that re-reading is the point at which the
+design either sheds a whole subsystem or acquires one.
 
 ## Decision
 
