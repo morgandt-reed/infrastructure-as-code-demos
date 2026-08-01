@@ -28,8 +28,8 @@ output "security_group_id" {
 output "workspace_config" {
   description = "Configuration values for Databricks workspace setup"
   value = {
-    credentials_id     = aws_iam_role.databricks_cross_account.arn
-    storage_config_id  = aws_s3_bucket.databricks_root.id
+    credentials_id    = aws_iam_role.databricks_cross_account.arn
+    storage_config_id = aws_s3_bucket.databricks_root.id
     network_config = {
       security_group_ids = [aws_security_group.databricks.id]
       subnet_ids         = var.subnet_ids

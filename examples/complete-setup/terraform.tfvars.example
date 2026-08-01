@@ -1,0 +1,27 @@
+# Copy to terraform.tfvars and adjust.
+
+name        = "demo"
+aws_region  = "us-west-2"
+environment = "dev"
+
+vpc_cidr = "10.0.0.0/16"
+az_count = 2
+
+# One NAT Gateway instead of one per AZ. Roughly $32/month each, so this is the
+# single biggest cost lever in the stack.
+single_nat_gateway = true
+
+instance_type = "t3.small"
+
+# Session Manager is enabled by default, so SSH is optional.
+# key_name          = "my-key-pair"
+# allowed_ssh_cidrs = ["203.0.113.0/24"]
+
+allowed_http_cidrs = ["0.0.0.0/0"]
+
+# Notify an SNS topic when the Docker host alarms fire
+# alarm_actions = ["arn:aws:sns:us-west-2:111122223333:ops-alerts"]
+
+# Databricks prerequisites (creates IAM roles and an S3 bucket)
+# enable_databricks_prerequisites = true
+# databricks_account_id           = "00000000-0000-0000-0000-000000000000"

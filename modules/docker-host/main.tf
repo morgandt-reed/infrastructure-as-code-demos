@@ -1,12 +1,4 @@
-terraform {
-  required_version = ">= 1.6"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
+# Terraform and provider constraints live in versions.tf
 
 # Data sources
 data "aws_ami" "ubuntu" {
@@ -25,57 +17,74 @@ data "aws_ami" "ubuntu" {
 }
 
 # Security Group
+#
+# Unrestricted egress is intentional and configurable: this host runs
+# `apt-get update` and pulls images from arbitrary registries during boot. Narrow
+# it by setting egress_cidr_blocks, or replace it with VPC endpoints plus a
+# registry allowlist if your environment can support that.
+#trivy:ignore:AVD-AWS-0104
 resource "aws_security_group" "docker_host" {
   name        = "${var.instance_name}-sg"
   description = "Security group for Docker host"
   vpc_id      = var.vpc_id
 
-  # SSH access
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.allowed_ssh_cidrs
+  # SSH access. Rendered only when allowed_ssh_cidrs is non-empty; an ingress
+  # block with no sources is rejected by the EC2 API.
+  dynamic "ingress" {
+    for_each = length(var.allowed_ssh_cidrs) > 0 ? [1] : []
+    content {
+      description = "SSH"
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = var.allowed_ssh_cidrs
+    }
   }
 
   # HTTP
-  ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = var.allowed_http_cidrs
+  dynamic "ingress" {
+    for_each = length(var.allowed_http_cidrs) > 0 ? [1] : []
+    content {
+      description = "HTTP"
+      from_port   = 80
+      to_port     = 80
+      protocol    = "tcp"
+      cidr_blocks = var.allowed_http_cidrs
+    }
   }
 
   # HTTPS
-  ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = var.allowed_http_cidrs
+  dynamic "ingress" {
+    for_each = length(var.allowed_http_cidrs) > 0 ? [1] : []
+    content {
+      description = "HTTPS"
+      from_port   = 443
+      to_port     = 443
+      protocol    = "tcp"
+      cidr_blocks = var.allowed_http_cidrs
+    }
   }
 
-  # Custom ports
+  # Custom ports. Each entry carries its own CIDR list — the module never
+  # defaults an extra port to 0.0.0.0/0.
   dynamic "ingress" {
-    for_each = var.additional_ports
+    for_each = { for p in var.additional_ports : tostring(p.port) => p }
     content {
-      description = "Custom port ${ingress.value}"
-      from_port   = ingress.value
-      to_port     = ingress.value
+      description = coalesce(ingress.value.description, "Custom port ${ingress.value.port}")
+      from_port   = ingress.value.port
+      to_port     = ingress.value.port
       protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
+      cidr_blocks = ingress.value.cidr_blocks
     }
   }
 
   # Outbound internet access
   egress {
-    description = "All outbound traffic"
+    description = "Outbound traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.egress_cidr_blocks
   }
 
   tags = merge(
@@ -86,48 +95,58 @@ resource "aws_security_group" "docker_host" {
   )
 }
 
+# IAM role for the instance. Required for the CloudWatch agent to publish
+# metrics and logs — without it the agent installs and then silently fails.
+resource "aws_iam_role" "docker_host" {
+  name = "${var.instance_name}-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "ec2.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "cloudwatch_agent" {
+  role       = aws_iam_role.docker_host.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+# Lets Session Manager replace SSH entirely, which is why allowed_ssh_cidrs
+# defaults to an empty list.
+resource "aws_iam_role_policy_attachment" "ssm" {
+  count      = var.enable_ssm ? 1 : 0
+  role       = aws_iam_role.docker_host.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "docker_host" {
+  name = "${var.instance_name}-profile"
+  role = aws_iam_role.docker_host.name
+
+  tags = var.tags
+}
+
 # EC2 Instance
 resource "aws_instance" "docker_host" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
-  key_name              = var.key_name
+  key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.docker_host.id]
-  subnet_id             = var.subnet_id
+  subnet_id              = var.subnet_id
+  iam_instance_profile   = aws_iam_instance_profile.docker_host.name
 
-  # User data script to install Docker
-  user_data = <<-EOF
-              #!/bin/bash
-              set -e
-
-              # Update system
-              apt-get update
-              apt-get upgrade -y
-
-              # Install Docker
-              curl -fsSL https://get.docker.com -o get-docker.sh
-              sh get-docker.sh
-
-              # Install Docker Compose
-              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-              chmod +x /usr/local/bin/docker-compose
-
-              # Add ubuntu user to docker group
-              usermod -aG docker ubuntu
-
-              # Enable Docker service
-              systemctl enable docker
-              systemctl start docker
-
-              # Install CloudWatch agent (optional)
-              wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
-              dpkg -i -E ./amazon-cloudwatch-agent.deb
-
-              # Create docker directory
-              mkdir -p /home/ubuntu/docker
-              chown ubuntu:ubuntu /home/ubuntu/docker
-
-              echo "Docker installation completed" > /var/log/user-data.log
-              EOF
+  user_data = templatefile("${path.module}/user-data.sh", {
+    install_cloudwatch_agent = var.install_cloudwatch_agent
+    compose_version          = var.docker_compose_version
+  })
 
   # Root volume configuration
   root_block_device {
@@ -185,6 +204,11 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   threshold           = "80"
   alarm_description   = "This metric monitors ec2 cpu utilization"
 
+  # An alarm with no actions changes state and notifies nobody. Pass SNS topic
+  # ARNs in alarm_actions to make it mean something.
+  alarm_actions = var.alarm_actions
+  ok_actions    = var.alarm_actions
+
   dimensions = {
     InstanceId = aws_instance.docker_host.id
   }
@@ -203,6 +227,9 @@ resource "aws_cloudwatch_metric_alarm" "status_check_failed" {
   statistic           = "Maximum"
   threshold           = "0"
   alarm_description   = "This metric monitors instance status checks"
+
+  alarm_actions = var.alarm_actions
+  ok_actions    = var.alarm_actions
 
   dimensions = {
     InstanceId = aws_instance.docker_host.id

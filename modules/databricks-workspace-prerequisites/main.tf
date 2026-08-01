@@ -1,23 +1,19 @@
-# Databricks Workspace Terraform Module
-# Creates a Databricks workspace with associated AWS resources
-
-terraform {
-  required_version = ">= 1.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-    databricks = {
-      source  = "databricks/databricks"
-      version = "~> 1.0"
-    }
-  }
-}
+# Databricks Workspace Prerequisites
+#
+# Creates the AWS-side resources a Databricks E2 workspace needs: the root S3
+# bucket, the cross-account IAM role Databricks assumes, an instance profile for
+# cluster nodes, and a security group.
+#
+# It does NOT create the workspace. No databricks_mws_credentials,
+# databricks_mws_storage_configurations, databricks_mws_networks or
+# databricks_mws_workspaces resource is declared here — feed the outputs of this
+# module into those resources in a configuration that has the databricks
+# provider configured with account-level credentials.
+#
+# Terraform and provider constraints live in versions.tf
 
 # Data sources
 data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
 
 # S3 Bucket for Databricks Root Storage
 resource "aws_s3_bucket" "databricks_root" {
@@ -67,7 +63,7 @@ resource "aws_iam_role" "databricks_cross_account" {
       {
         Effect = "Allow"
         Principal = {
-          AWS = "arn:aws:iam::414351767826:root"  # Databricks AWS account
+          AWS = "arn:aws:iam::414351767826:root" # Databricks AWS account
         }
         Action = "sts:AssumeRole"
         Condition = {
@@ -235,21 +231,28 @@ resource "aws_iam_instance_profile" "databricks" {
 }
 
 # Security Group for Databricks
+#
+# Databricks requires unrestricted egress on the cluster security group: nodes
+# call the control plane, the metastore and the artifact storage over the public
+# internet unless you deploy the full PrivateLink topology, which is out of
+# scope for this module.
+#trivy:ignore:AVD-AWS-0104
 resource "aws_security_group" "databricks" {
   name        = "${var.workspace_name}-sg"
   description = "Security group for Databricks workspace"
   vpc_id      = var.vpc_id
 
-  # Allow all traffic within the security group
+  # Cluster nodes talk to each other on all ports
   ingress {
-    from_port = 0
-    to_port   = 0
-    protocol  = "-1"
-    self      = true
+    description = "Intra-cluster traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    self        = true
   }
 
-  # Allow outbound traffic
   egress {
+    description = "Databricks control plane, metastore and artifact storage"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"

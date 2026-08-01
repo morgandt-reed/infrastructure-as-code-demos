@@ -5,53 +5,57 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.6+-purple?logo=terraform)](https://www.terraform.io/)
 [![AWS](https://img.shields.io/badge/AWS-Provider_5.0-orange?logo=amazonaws)](https://aws.amazon.com/)
 
-Production-ready Terraform modules demonstrating multi-cloud infrastructure patterns and best practices.
+Three reusable AWS Terraform modules and a working example that composes them.
 
 ## Overview
 
-This repository showcases reusable Terraform modules for common infrastructure patterns across AWS, Azure, and GCP. Each module is self-contained, well-documented, and production-ready.
+**AWS only.** There are no Azure or GCP modules here, and the only provider any
+module declares is `hashicorp/aws ~> 5.0`.
+
+Everything is checked in CI with no escape hatches: `terraform fmt -check
+-recursive`, `terraform init` + `validate` for each module and the example,
+TFLint's recommended Terraform ruleset, and a Trivy config scan that fails the
+build on any HIGH or CRITICAL finding. The two accepted risks are annotated
+inline with `#trivy:ignore:<id>` and a written justification, so a new finding
+still turns the build red.
+
+What is **not** here: no `terraform test` suites, no Terratest, no automated
+`plan` against a real account. "Valid and scan-clean" is the claim; "applies
+cleanly to AWS" is not verified by CI.
 
 ## Architecture
 
-### AWS VPC Infrastructure
+### What `examples/complete-setup` builds
 
 ```mermaid
 flowchart TB
     subgraph AWS Region
         subgraph VPC[VPC 10.0.0.0/16]
             subgraph AZ1[Availability Zone A]
-                PubSub1[Public Subnet<br/>10.0.1.0/24]
-                PrivSub1[Private Subnet<br/>10.0.11.0/24]
+                PubSub1[Public Subnet]
+                PrivSub1[Private Subnet]
             end
             subgraph AZ2[Availability Zone B]
-                PubSub2[Public Subnet<br/>10.0.2.0/24]
-                PrivSub2[Private Subnet<br/>10.0.12.0/24]
+                PubSub2[Public Subnet]
+                PrivSub2[Private Subnet]
             end
 
             IGW[Internet Gateway]
-            NAT[NAT Gateway]
-            ALB[Application<br/>Load Balancer]
+            NAT[NAT Gateway<br/>shared by default]
+            EC2[EC2 Docker Host<br/>+ Elastic IP]
+            S3EP[S3 Gateway Endpoint]
         end
 
-        subgraph Compute
-            EC2[EC2 Docker Host]
-            ASG[Auto Scaling Group]
-        end
-
-        subgraph Data
-            RDS[(RDS PostgreSQL)]
-            S3[(S3 Bucket)]
-        end
+        FlowLogs[[CloudWatch<br/>Flow Logs + Alarms]]
     end
 
     Internet((Internet)) --> IGW
     IGW --> PubSub1 & PubSub2
     PubSub1 --> NAT
     NAT --> PrivSub1 & PrivSub2
-    ALB --> ASG
-    ASG --> EC2
-    EC2 --> RDS
-    EC2 --> S3
+    PubSub1 --> EC2
+    PrivSub1 & PrivSub2 --> S3EP
+    VPC -.-> FlowLogs
 
     style VPC fill:#FF9900,color:#000
     style PubSub1 fill:#7AA116,color:#fff
@@ -59,6 +63,10 @@ flowchart TB
     style PrivSub1 fill:#1A73E8,color:#fff
     style PrivSub2 fill:#1A73E8,color:#fff
 ```
+
+Subnet CIDRs are derived with `cidrsubnet(var.vpc_cidr, 4, n)` rather than
+hardcoded, so they follow whatever `vpc_cidr` and `az_count` you set. Nothing
+here creates an ALB, an Auto Scaling Group or an RDS instance.
 
 ### Terraform Module Composition
 
@@ -73,122 +81,142 @@ flowchart LR
     subgraph Child Modules
         VPC[modules/vpc]
         Docker[modules/docker-host]
-        DB[modules/databricks-workspace]
+        DB[modules/databricks-workspace-prerequisites]
     end
 
-    subgraph Providers
-        AWS[AWS Provider]
-        Azure[Azure Provider]
-        GCP[GCP Provider]
-    end
+    AWS[AWS Provider ~> 5.0]
 
     Main --> VPC & Docker & DB
     VPC & Docker & DB --> AWS
-    VPC --> Azure
-    VPC --> GCP
 
     style Main fill:#7B42BC,color:#fff
     style AWS fill:#FF9900,color:#000
-    style Azure fill:#0089D6,color:#fff
-    style GCP fill:#4285F4,color:#fff
 ```
+
+The root module in that diagram is
+[`examples/complete-setup/`](examples/complete-setup/).
 
 ## Repository Structure
 
 ```
 .
 ├── README.md
+├── .tflint.hcl
 ├── modules/
-│   ├── docker-host/            # EC2 instance with Docker pre-installed
-│   ├── databricks-workspace/   # Databricks workspace setup
-│   └── vpc/                    # Reusable VPC module
+│   ├── vpc/                                    # VPC, subnets, NAT, flow logs
+│   ├── docker-host/                            # EC2 with Docker + Compose
+│   └── databricks-workspace-prerequisites/     # AWS side of a Databricks workspace
 ├── examples/
-│   └── complete-setup/         # Complete infrastructure stack
+│   └── complete-setup/                         # Composes all three
 └── .github/
     └── workflows/
-        └── terraform-validate.yml  # CI/CD for validation
+        └── terraform-validate.yml
 ```
+
+Every module has `main.tf`, `variables.tf`, `outputs.tf`, `versions.tf` and a
+`README.md`. Usage examples live in each module's README and in
+`examples/complete-setup/`; there is no per-module `examples/` directory.
 
 ## Modules
 
-### 1. Docker Host (AWS)
-**Path**: [modules/docker-host/](modules/docker-host/)
+### 1. VPC
+**Path**: [modules/vpc/](modules/vpc/)
 
-Creates an EC2 instance with:
-- Docker and Docker Compose pre-installed
-- Security group with configurable ports
-- Optional Elastic IP
-- CloudWatch monitoring
-- Auto-recovery enabled
+- Public, private and optional database subnets across `az_count` AZs, with
+  non-overlapping CIDRs derived by `cidrsubnet` rather than hand-written lists
+- NAT Gateways: one per AZ, or a single shared one (`single_nat_gateway`), or
+  none — the route tables and EIPs follow the choice
+- VPC Flow Logs end to end: log group, IAM role, scoped policy
+- S3 gateway endpoint, associated with every route table
+- Network ACLs for public and private tiers
+- Nine `validation` blocks on the inputs
 
-**Usage**:
 ```hcl
-module "docker_host" {
-  source = "./modules/docker-host"
+module "vpc" {
+  source = "../../modules/vpc"
 
-  instance_name    = "my-docker-host"
-  instance_type    = "t3.medium"
-  key_name         = "my-key-pair"
-  allowed_ssh_cidrs = ["0.0.0.0/0"]
+  name     = "production"
+  vpc_cidr = "10.0.0.0/16"
+  az_count = 3
+
+  enable_nat_gateway      = true
+  single_nat_gateway      = false
+  create_database_subnets = true
+  enable_flow_logs        = true
+  enable_s3_endpoint      = true
 
   tags = {
     Environment = "production"
-    Project     = "microservices"
   }
 }
 ```
 
-### 2. Databricks Workspace
-**Path**: [modules/databricks-workspace/](modules/databricks-workspace/)
+### 2. Docker Host
+**Path**: [modules/docker-host/](modules/docker-host/)
 
-Sets up Databricks workspace with:
-- Workspace creation
-- Cluster policies
-- Secret scopes
-- IAM roles and policies
-- S3 bucket for data storage
+- Ubuntu 22.04, latest Canonical AMI, with `ignore_changes = [ami]` so a new
+  AMI release does not silently replace a running instance
+- Encrypted gp3 root volume, IMDSv2 required
+- Docker Engine and a `docker-compose` shim installed by user-data
+- Instance profile with `CloudWatchAgentServerPolicy` and (by default)
+  `AmazonSSMManagedInstanceCore`, so Session Manager replaces SSH —
+  `allowed_ssh_cidrs` defaults to empty and creates no SSH rule at all
+- Each entry in `additional_ports` carries its own CIDR list; the module never
+  defaults an extra port to `0.0.0.0/0`
+- Optional Elastic IP and two CloudWatch alarms, which take `alarm_actions`
 
-**Usage**:
 ```hcl
-module "databricks" {
-  source = "./modules/databricks-workspace"
+module "docker_host" {
+  source = "../../modules/docker-host"
 
-  workspace_name = "data-engineering"
-  aws_region     = "us-west-2"
-  cluster_policy = "general-purpose"
+  instance_name = "my-docker-host"
+  instance_type = "t3.medium"
+
+  vpc_id    = module.vpc.vpc_id
+  subnet_id = module.vpc.public_subnet_ids[0]
+
+  additional_ports = [
+    {
+      port        = 8080
+      cidr_blocks = ["10.0.0.0/16"]
+      description = "Application port, VPC-internal only"
+    }
+  ]
+
+  alarm_actions = [aws_sns_topic.ops.arn]
+
+  tags = {
+    Environment = "production"
+  }
+}
+```
+
+### 3. Databricks Workspace Prerequisites
+**Path**: [modules/databricks-workspace-prerequisites/](modules/databricks-workspace-prerequisites/)
+
+Creates the **AWS-side** resources a Databricks E2 workspace needs: root S3
+bucket, cross-account IAM role, cluster instance profile, security group.
+
+It does **not** create a workspace — no `databricks_*` resource is declared and
+the Databricks provider is not configured. Feed its outputs into
+`databricks_mws_credentials`, `databricks_mws_storage_configurations`,
+`databricks_mws_networks` and `databricks_mws_workspaces` from a configuration
+that has account-level Databricks credentials. The module's README shows exactly
+that. It was previously called `databricks-workspace`, which overstated it.
+
+```hcl
+module "databricks_prereqs" {
+  source = "../../modules/databricks-workspace-prerequisites"
+
+  workspace_name        = "data-engineering"
+  environment           = "prod"
+  databricks_account_id = var.databricks_account_id
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnet_ids
 
   tags = {
     Team = "data"
-  }
-}
-```
-
-### 3. VPC
-**Path**: [modules/vpc/](modules/vpc/)
-
-Creates a production-ready VPC with:
-- Public and private subnets across AZs
-- NAT Gateway for private subnet internet access
-- VPC endpoints for AWS services
-- Flow logs for network monitoring
-- Network ACLs
-
-**Usage**:
-```hcl
-module "vpc" {
-  source = "./modules/vpc"
-
-  vpc_name            = "production-vpc"
-  vpc_cidr            = "10.0.0.0/16"
-  availability_zones  = ["us-west-2a", "us-west-2b"]
-  public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
-  private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24"]
-
-  enable_nat_gateway = true
-  enable_vpn_gateway = false
-
-  tags = {
-    Environment = "production"
   }
 }
 ```
@@ -197,30 +225,26 @@ module "vpc" {
 
 ### Prerequisites
 
-- Terraform 1.6+
+- Terraform 1.6+ (the modules use `optional()` in object types, which needs 1.3+)
 - AWS CLI configured
-- (Optional) Azure CLI
-- (Optional) GCP SDK
 
 ### Deploy Infrastructure
 
 ```bash
-# Clone repository
 git clone <your-repo-url>
-cd infrastructure-as-code-demos
+cd infrastructure-as-code-demos/examples/complete-setup
 
-# Navigate to example
-cd examples/complete-setup
+cp terraform.tfvars.example terraform.tfvars
+# edit terraform.tfvars
 
-# Initialize Terraform
 terraform init
-
-# Review plan
 terraform plan
-
-# Apply changes
 terraform apply
 ```
+
+This applies real, billable resources — a NAT Gateway, an Elastic IP and an EC2
+instance. See [the example's README](examples/complete-setup/README.md) for the
+cost breakdown.
 
 ### Destroy Infrastructure
 
@@ -231,15 +255,14 @@ terraform destroy
 ## Module Development Guidelines
 
 ### 1. Module Structure
-Each module should have:
+Each module here has:
 ```
 module-name/
 ├── main.tf           # Primary resource definitions
 ├── variables.tf      # Input variables
 ├── outputs.tf        # Output values
 ├── versions.tf       # Terraform and provider versions
-├── README.md         # Module documentation
-└── examples/         # Usage examples
+└── README.md         # Documentation, including a usage example
 ```
 
 ### 2. Variable Naming
@@ -303,17 +326,27 @@ resource "aws_eip" "app" {
 ```
 
 ### 5. Dynamic Blocks
+
+From `modules/docker-host`. Note that the CIDR list comes from the caller —
+defaulting it to `0.0.0.0/0` inside a dynamic block is how a module quietly
+opens every extra port to the internet:
+
 ```hcl
 dynamic "ingress" {
-  for_each = var.allowed_ports
+  for_each = { for p in var.additional_ports : tostring(p.port) => p }
   content {
-    from_port   = ingress.value
-    to_port     = ingress.value
+    description = coalesce(ingress.value.description, "Custom port ${ingress.value.port}")
+    from_port   = ingress.value.port
+    to_port     = ingress.value.port
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ingress.value.cidr_blocks
   }
 }
 ```
+
+The same pattern renders a block zero times when a list is empty, which is how
+`allowed_ssh_cidrs = []` produces no SSH rule instead of an ingress rule with no
+sources (which the EC2 API rejects).
 
 ## Security Best Practices
 
@@ -429,97 +462,51 @@ resource "aws_s3_bucket_lifecycle_configuration" "app" {
 }
 ```
 
-## Multi-Cloud Support
-
-### AWS Example
-```hcl
-provider "aws" {
-  region = "us-west-2"
-}
-
-resource "aws_instance" "app" {
-  ami           = "ami-0c55b159cbfafe1f0"
-  instance_type = "t3.micro"
-}
-```
-
-### Azure Example
-```hcl
-provider "azurerm" {
-  features {}
-}
-
-resource "azurerm_virtual_machine" "app" {
-  name                  = "app-vm"
-  location              = "West US"
-  resource_group_name   = azurerm_resource_group.main.name
-  vm_size               = "Standard_B2s"
-}
-```
-
-### GCP Example
-```hcl
-provider "google" {
-  project = "my-project"
-  region  = "us-central1"
-}
-
-resource "google_compute_instance" "app" {
-  name         = "app-instance"
-  machine_type = "e2-medium"
-  zone         = "us-central1-a"
-}
-```
-
 ## CI/CD Integration
 
-### GitHub Actions Workflow
 **File**: [.github/workflows/terraform-validate.yml](.github/workflows/terraform-validate.yml)
 
-```yaml
-name: Terraform Validation
+Four jobs, none of which can be satisfied by a command that always succeeds:
 
-on: [push, pull_request]
+| Job | What it runs |
+|---|---|
+| `fmt` | `terraform fmt -check -recursive -diff` |
+| `validate` | `terraform init -backend=false` + `validate`, as a matrix over all three modules and the example |
+| `tflint` | TFLint's bundled Terraform ruleset, `recommended` preset, over every module and example |
+| `security` | `trivy config` with `severity: CRITICAL,HIGH` and `exit-code: 1` |
 
-jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: hashicorp/setup-terraform@v2
-      - run: terraform fmt -check
-      - run: terraform init
-      - run: terraform validate
-```
+Trivy replaced tfsec, which is deprecated and was running here with
+`soft_fail: true` — reporting findings while always passing. The two risks that
+are genuinely accepted (unrestricted egress on the Docker host and the Databricks
+cluster SG; `map_public_ip_on_launch` on public subnets) are annotated inline
+with `#trivy:ignore:<id>` and a justification, so they are visible in review and
+a new finding still fails the build.
 
 ## Testing
 
-### Terraform Validate
-```bash
-terraform validate
-```
+Everything CI does, locally:
 
-### Terraform Format Check
 ```bash
 terraform fmt -check -recursive
+
+for d in modules/*/ examples/*/; do
+  terraform -chdir="$d" init -backend=false && terraform -chdir="$d" validate
+done
+
+tflint --init
+for d in modules/*/ examples/*/; do
+  tflint --chdir="$d" --config="$(pwd)/.tflint.hcl"
+done
+
+trivy config --severity CRITICAL,HIGH --exit-code 1 .
 ```
 
-### Security Scanning
-```bash
-# Install tfsec
-brew install tfsec
-
-# Scan for security issues
-tfsec .
-```
+There are no `terraform test` suites or Terratest coverage yet — see Next Steps.
 
 ### Cost Estimation
 ```bash
-# Install infracost
 brew install infracost
-
-# Estimate costs
-infracost breakdown --path .
+infracost breakdown --path examples/complete-setup
 ```
 
 ## Environment Separation
@@ -602,7 +589,7 @@ VPC → EKS Cluster → RDS → ElastiCache → S3
 ## Trade-offs and Design Decisions
 
 ### Why Terraform?
-- Cloud-agnostic (mostly)
+- One tool across providers, even though this repo only uses AWS
 - Large provider ecosystem
 - State management built-in
 - HCL is declarative and readable
@@ -621,12 +608,14 @@ VPC → EKS Cluster → RDS → ElastiCache → S3
 
 ## Next Steps
 
-- [ ] Add Azure modules
-- [ ] Add GCP modules
-- [ ] Implement Terratest for automated testing
-- [ ] Add Sentinel policies for compliance
-- [ ] Create private module registry
-- [ ] Add disaster recovery patterns
+- [ ] `terraform test` suites for the VPC module's branching: NAT on/off/single,
+      CIDR math at each `az_count`, flow logs on/off
+- [ ] A `terraform plan` job in CI against a sandbox account via OIDC, so the
+      badge covers more than schema validity
+- [ ] Bucket policy for the Databricks root bucket, and a GovCloud-aware
+      cross-account principal
+- [ ] Add Azure or GCP modules, or drop the ambition — right now this is an AWS
+      repository and says so
 
 ## Resources
 
@@ -638,7 +627,3 @@ VPC → EKS Cluster → RDS → ElastiCache → S3
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details
-
----
-
-**Built to demonstrate production-ready infrastructure as code patterns for multi-cloud deployments.**

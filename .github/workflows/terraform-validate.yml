@@ -2,61 +2,87 @@ name: Terraform Validation
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+env:
+  TERRAFORM_VERSION: 1.9.8
 
 jobs:
-  validate:
-    name: Validate Terraform
+  fmt:
+    name: Format Check
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: 1.6.0
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-    - name: Terraform Format Check
-      run: terraform fmt -check -recursive
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
 
-    - name: Terraform Init (modules)
-      run: |
-        for dir in modules/*/; do
-          echo "Initializing $dir"
-          cd "$dir"
-          terraform init -backend=false
-          cd -
-        done
+  validate:
+    name: Validate ${{ matrix.dir }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir:
+          - modules/vpc
+          - modules/docker-host
+          - modules/databricks-workspace-prerequisites
+          - examples/complete-setup
+    steps:
+      - uses: actions/checkout@v4
 
-    - name: Terraform Validate
-      run: |
-        for dir in modules/*/; do
-          echo "Validating $dir"
-          cd "$dir"
-          terraform validate
-          cd -
-        done
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-    - name: TFSec Security Scan
-      uses: aquasecurity/tfsec-action@v1.0.0
-      with:
-        soft_fail: true
+      - name: terraform init
+        run: terraform -chdir=${{ matrix.dir }} init -backend=false -input=false
 
-    - name: TFLint
-      uses: terraform-linters/setup-tflint@v3
-      with:
-        tflint_version: latest
+      - name: terraform validate
+        run: terraform -chdir=${{ matrix.dir }} validate
 
-    - name: Run TFLint
-      run: |
-        tflint --init
-        for dir in modules/*/; do
-          echo "Linting $dir"
-          cd "$dir"
-          tflint
-          cd -
-        done
+  tflint:
+    name: TFLint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.55.1
+
+      - name: tflint --init
+        run: tflint --init
+
+      - name: Lint every module and example
+        run: |
+          for dir in modules/*/ examples/*/; do
+            echo "::group::$dir"
+            tflint --chdir="$dir" --config="$(pwd)/.tflint.hcl"
+            echo "::endgroup::"
+          done
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # tfsec is deprecated in favour of Trivy, which absorbed its rule set.
+      # exit-code 1 and no soft_fail: a HIGH or CRITICAL finding fails the build.
+      # Accepted risks are annotated inline with #trivy:ignore:<id> plus a
+      # written justification, so a *new* finding still fails.
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'

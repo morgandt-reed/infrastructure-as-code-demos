@@ -1,4 +1,8 @@
-# Variables for Databricks Workspace Module
+# Variables for the Databricks workspace prerequisites module.
+#
+# enable_serverless and pricing_tier used to live here. They are attributes of
+# a databricks_mws_workspaces resource, which this module does not create, so
+# nothing read them.
 
 variable "workspace_name" {
   description = "Name of the Databricks workspace"
@@ -46,23 +50,6 @@ variable "s3_kms_key_arn" {
   description = "KMS key ARN for S3 bucket encryption (leave empty for AES256)"
   type        = string
   default     = ""
-}
-
-variable "enable_serverless" {
-  description = "Enable serverless compute for the workspace"
-  type        = bool
-  default     = false
-}
-
-variable "pricing_tier" {
-  description = "Databricks pricing tier (STANDARD, PREMIUM, ENTERPRISE)"
-  type        = string
-  default     = "PREMIUM"
-
-  validation {
-    condition     = contains(["STANDARD", "PREMIUM", "ENTERPRISE"], var.pricing_tier)
-    error_message = "Pricing tier must be one of: STANDARD, PREMIUM, ENTERPRISE."
-  }
 }
 
 variable "tags" {

@@ -1,0 +1,18 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Variable files may contain account IDs or CIDRs specific to your environment.
+# terraform.tfvars.example is committed; terraform.tfvars is not.
+*.tfvars
+!*.tfvars.example
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

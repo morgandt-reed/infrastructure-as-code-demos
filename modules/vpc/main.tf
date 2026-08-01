@@ -1,15 +1,7 @@
 # VPC Terraform Module
 # Creates a production-ready VPC with public and private subnets
 
-terraform {
-  required_version = ">= 1.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
+# Terraform and provider constraints live in versions.tf
 
 # Data sources
 data "aws_availability_zones" "available" {
@@ -41,6 +33,9 @@ resource "aws_internet_gateway" "main" {
 }
 
 # Public Subnets
+# map_public_ip_on_launch is what makes a subnet public; scanners flag it by
+# default. Workloads that must not be internet-facing belong in aws_subnet.private.
+#trivy:ignore:AVD-AWS-0164
 resource "aws_subnet" "public" {
   count = var.az_count
 
