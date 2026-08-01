@@ -586,6 +586,23 @@ VPC → Databricks Workspace → S3 Data Lake → Glue Catalog
 VPC → EKS Cluster → RDS → ElastiCache → S3
 ```
 
+## Design decisions
+
+Recorded as ADRs in [`docs/adr/`](docs/adr/):
+
+- [ADR-0001](docs/adr/0001-bootstrap-before-terraform.md) — **bootstrap is an
+  explicit one-time phase before any `terraform init`, producing enabled APIs, an
+  enumerated least-privilege provisioning identity, a versioned state bucket
+  scoped to that identity, and a federated trust relationship instead of a key.**
+  *(Proposed — this repository has no bootstrap phase and defaults to local
+  state.)*
+- [ADR-0002](docs/adr/0002-eliminate-the-secret.md) — **modules default to
+  platform-native workload identity, so a stored credential is an explicitly
+  configured departure rather than the path a caller gets by doing nothing.**
+  *(Accepted, partially implemented — Session Manager replaces SSH on the Docker
+  host, and the Databricks integration uses a cross-account role rather than
+  keys.)*
+
 ## Trade-offs and Design Decisions
 
 ### Why Terraform?
